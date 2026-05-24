@@ -1,20 +1,25 @@
-# Use Python 3.11 slim image as base
-FROM python:3.11-slim
+FROM ghcr.io/astral-sh/uv:python3.12-alpine AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first for better layer caching
-COPY requirements.txt .
+COPY pyproject.toml uv.lock ./
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv sync --locked --no-dev --no-cache --compile-bytecode \
+    && find .venv -type d -name "__pycache__" -exec rm -rf {} + \
+    && rm -rf .venv/lib/python3.12/site-packages/pip* \
+    && rm -rf .venv/lib/python3.12/site-packages/setuptools* \
+    && rm -rf .venv/lib/python3.12/site-packages/wheel*
 
-# Copy application code
-COPY . .
+FROM python:3.12-alpine AS final
 
-# Set Python to run in unbuffered mode (real-time logs)
+WORKDIR /app
+
+COPY --from=builder /app/.venv /app/.venv
+
+ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
-# Run the bot
-CMD ["python", "main.py"]
+COPY ./src ./src
+
+CMD ["python", "-m", "src"]

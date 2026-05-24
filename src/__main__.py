@@ -8,8 +8,7 @@ from maxapi.webhook.aiohttp import AiohttpMaxWebhook
 
 import config
 from loader import max_dp, max_bot, tg_dp, tg_bot
-import handlers.max_handlers  # noqa: F401  — registers MAX handlers on import
-import handlers.tg_handlers  # noqa: F401  — registers TG handlers on import
+import src.handlers.tg_handlers  # noqa: F401  — registers TG handlers on import
 
 logging.basicConfig(level=logging.INFO)
 

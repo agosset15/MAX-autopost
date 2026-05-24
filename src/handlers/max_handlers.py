@@ -9,8 +9,8 @@ from maxapi.enums.attachment import AttachmentType
 from maxapi.types import BotStarted, MessageCreated
 from maxapi import F
 
-import config
-from loader import max_dp, max_bot, tg_bot
+from src import config
+from src.loader import max_dp, max_bot, tg_bot
 
 
 @max_dp.bot_started()

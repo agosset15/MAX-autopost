@@ -14,8 +14,8 @@ from maxapi.enums.upload_type import UploadType
 from maxapi.exceptions import MaxApiError
 from maxapi.types import InputMedia
 
-import config
-from loader import tg_dp, tg_bot, max_bot
+from src import config
+from src.loader import tg_dp, tg_bot, max_bot
 
 
 media_groups: dict[str, list[TgMessage]] = {}

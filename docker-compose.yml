@@ -1,7 +1,7 @@
 services:
   bot:
     build: .
-    container_name: maxautopost-bot
+    container_name: max-autopost-bot
     restart: unless-stopped
     env_file:
       - .env
