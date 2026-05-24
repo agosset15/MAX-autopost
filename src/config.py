@@ -22,7 +22,7 @@ TELEGRAM_WEBHOOK_PATH: str = os.getenv("TELEGRAM_WEBHOOK_PATH", "/webhook/tg")
 MAX_WEBHOOK_PATH: str = os.getenv("MAX_WEBHOOK_PATH", "/webhook/max")
 
 TELEGRAM_WEBHOOK_URL = urlparse(WEBHOOK_URL)._replace(path=TELEGRAM_WEBHOOK_PATH).geturl()
-MAX_WEBHOOK_URL = urlparse(WEBHOOK_URL)._replace(path=MAX_WEBHOOK_PATH).geturl()
+MAX_WEBHOOK_URL = os.getenv("MAX_WEBHOOK_URL") or urlparse(WEBHOOK_URL)._replace(path=MAX_WEBHOOK_PATH).geturl()
 
 WEBHOOK_HOST: str = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "9154"))

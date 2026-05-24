@@ -18,7 +18,7 @@ from src.config import (
 )
 from src.loader import max_bot, max_dp, tg_bot, tg_dp
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, force=True)
 
 
 async def main():
@@ -66,8 +66,5 @@ async def main():
         logging.info("Shutdown complete")
 
 
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Stopped by user")
+if __name__ == "__main__":
+    asyncio.run(main())
