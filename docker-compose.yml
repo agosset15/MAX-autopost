@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    container_name: maxautopost-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "9154:9154"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./channels.json:/app/channels.json:ro
