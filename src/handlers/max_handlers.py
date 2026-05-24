@@ -9,7 +9,7 @@ from maxapi.enums.attachment import AttachmentType
 from maxapi.types import BotStarted, MessageCreated
 from maxapi import F
 
-from src import config
+from src.config import MAX_TO_TG
 from src.loader import max_dp, max_bot, tg_bot
 
 
@@ -202,7 +202,7 @@ async def forward_to_tg(message, tg_id: int):
 
 # ====== MAIN HANDLER ======
 
-@max_dp.message_created(F.message.recipient.chat_id.in_(config.MAX_TO_TG))
+@max_dp.message_created(F.message.recipient.chat_id.in_(MAX_TO_TG))
 async def on_max_message(event: MessageCreated):
     chat_id = event.message.recipient.chat_id
     if not chat_id:
@@ -212,7 +212,7 @@ async def on_max_message(event: MessageCreated):
     if sender and max_bot.me and sender.user_id == max_bot.me.user_id:
         return  # ignore the bot's own messages
 
-    cfg = config.MAX_TO_TG[chat_id]
+    cfg = MAX_TO_TG[chat_id]
 
     if cfg.allowed_user_ids is not None:
         if sender and sender.user_id not in cfg.allowed_user_ids:

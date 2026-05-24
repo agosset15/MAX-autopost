@@ -3,17 +3,17 @@ from aiogram.enums import ParseMode
 from maxapi import Bot as MaxBot, Dispatcher as MaxDispatcher
 from aiogram import Bot as TgBot, Dispatcher as TgDispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
-import config
+from src.config import MAX_BOT_TOKEN, PROXY_URL, TELEGRAM_BOT_TOKEN
 
 # Initialize Bots
-max_bot = MaxBot(token=config.MAX_BOT_TOKEN)
+max_bot = MaxBot(token=MAX_BOT_TOKEN)
 max_dp = MaxDispatcher()
 
 session = None
-if config.PROXY_URL:
-    session = AiohttpSession(proxy=config.PROXY_URL)
+if PROXY_URL:
+    session = AiohttpSession(proxy=PROXY_URL)
 tg_bot = TgBot(
-    token=config.TELEGRAM_BOT_TOKEN,
+    token=TELEGRAM_BOT_TOKEN,
     session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )

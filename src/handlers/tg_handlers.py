@@ -14,7 +14,7 @@ from maxapi.enums.upload_type import UploadType
 from maxapi.exceptions import MaxApiError
 from maxapi.types import InputMedia
 
-from src import config
+from src.config import CHANNEL_MAP, GROUP_MAP
 from src.loader import tg_dp, tg_bot, max_bot
 
 
@@ -268,14 +268,14 @@ async def forward_to_max(message: TgMessage, max_id: int):
 
 # ====== MAIN HANDLERS ======
 
-@tg_dp.channel_post(F.chat.id.in_(config.CHANNEL_MAP))
+@tg_dp.channel_post(F.chat.id.in_(CHANNEL_MAP))
 async def on_channel_post(message: TgMessage):
-    await forward_to_max(message, config.CHANNEL_MAP[message.chat.id])
+    await forward_to_max(message, CHANNEL_MAP[message.chat.id])
 
 
-@tg_dp.message(F.chat.id.in_(config.GROUP_MAP))
+@tg_dp.message(F.chat.id.in_(GROUP_MAP))
 async def on_group_message(message: TgMessage):
-    cfg = config.GROUP_MAP[message.chat.id]
+    cfg = GROUP_MAP[message.chat.id]
 
     if cfg.allowed_user_ids is not None:
         if not message.from_user or message.from_user.id not in cfg.allowed_user_ids:
