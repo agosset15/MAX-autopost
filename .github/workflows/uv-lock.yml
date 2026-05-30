@@ -3,7 +3,7 @@ name: Update uv.lock
 on:
   push:
     branches:
-      - dev
+      - main
 
 permissions:
   contents: write
