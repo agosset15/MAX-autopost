@@ -5,8 +5,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiohttp import web
 from maxapi.webhook.aiohttp import AiohttpMaxWebhook
 
-import src.handlers.tg_handlers
-import src.handlers.max_handlers
+from src.handlers.telegram import tg_router
+from src.handlers.max import max_router
 from src.config import (
     MAX_WEBHOOK_PATH,
     MAX_WEBHOOK_URL,
@@ -25,6 +25,9 @@ async def main():
     logging.info("Starting bots...")
 
     await message_map.connect()
+
+    tg_dp.include_router(tg_router)
+    max_dp.include_routers(max_router)
 
     max_bot.me = await max_bot.get_me()
 

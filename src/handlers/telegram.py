@@ -6,7 +6,7 @@ import re
 import tempfile
 from typing import TypeAlias, Union
 
-from aiogram import F
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message as TgMessage, Video, PhotoSize, Document, Audio
 from maxapi.enums.message_link_type import MessageLinkType
@@ -17,7 +17,7 @@ from maxapi.methods.types.sended_message import SendedMessage
 from maxapi.types import InputMedia, NewMessageLink
 
 from src.config import CHANNEL_MAP, GROUP_MAP
-from src.loader import max_bot, message_map, tg_bot, tg_dp
+from src.loader import max_bot, message_map, tg_bot
 from src.storage.message_map import MaxRef, TgRef
 
 
@@ -25,6 +25,8 @@ media_groups: dict[str, list[TgMessage]] = {}
 _bg_tasks: set[asyncio.Task] = set()
 
 AnyMedia: TypeAlias = Union[Video, PhotoSize, Document, Audio]
+
+tg_router = Router()
 
 
 async def _safe_max_send(**kwargs) -> SendedMessage | None:
@@ -330,12 +332,12 @@ async def forward_edit_to_max(message: TgMessage):
 
 # ====== MAIN HANDLERS ======
 
-@tg_dp.channel_post(F.chat.id.in_(CHANNEL_MAP))
+@tg_router.channel_post(F.chat.id.in_(CHANNEL_MAP))
 async def on_channel_post(message: TgMessage):
     await forward_to_max(message, CHANNEL_MAP[message.chat.id])
 
 
-@tg_dp.message(F.chat.id.in_(GROUP_MAP))
+@tg_router.message(F.chat.id.in_(GROUP_MAP))
 async def on_group_message(message: TgMessage):
     cfg = GROUP_MAP[message.chat.id]
 
@@ -351,12 +353,12 @@ async def on_group_message(message: TgMessage):
     await forward_to_max(message, cfg.chat_id)
 
 
-@tg_dp.edited_channel_post(F.chat.id.in_(CHANNEL_MAP))
+@tg_router.edited_channel_post(F.chat.id.in_(CHANNEL_MAP))
 async def on_channel_post_edited(message: TgMessage):
     await forward_edit_to_max(message)
 
 
-@tg_dp.edited_message(F.chat.id.in_(GROUP_MAP))
+@tg_router.edited_message(F.chat.id.in_(GROUP_MAP))
 async def on_group_message_edited(message: TgMessage):
     cfg = GROUP_MAP[message.chat.id]
     if cfg.allowed_user_ids is not None:

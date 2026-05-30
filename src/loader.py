@@ -8,7 +8,7 @@ from src.storage.message_map import MessageMapService
 
 # Initialize Bots
 max_bot = MaxBot(token=MAX_BOT_TOKEN)
-max_dp = MaxDispatcher()
+max_dp = MaxDispatcher(router_id="main")
 
 session = None
 if PROXY_URL:

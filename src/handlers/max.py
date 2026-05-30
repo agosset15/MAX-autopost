@@ -9,14 +9,16 @@ from maxapi.enums.attachment import AttachmentType
 from maxapi.enums.message_link_type import MessageLinkType
 from maxapi.types import BotStarted, MessageCreated
 from maxapi.types.updates.message_edited import MessageEdited
-from maxapi import F
+from maxapi import F, Router
 
 from src.config import MAX_TO_TG
-from src.loader import max_bot, max_dp, message_map, tg_bot
+from src.loader import max_bot, message_map, tg_bot
 from src.storage.message_map import MaxRef, TgRef
 
+max_router = Router(router_id="main")
 
-@max_dp.bot_started()
+
+@max_router.bot_started()
 async def bot_started(event: BotStarted):
     await max_bot.send_message(
         chat_id=event.chat_id,
@@ -295,7 +297,7 @@ async def forward_edit_to_tg(message, tg_id: int):
 
 # ====== MAIN HANDLERS ======
 
-@max_dp.message_created(F.message.recipient.chat_id.in_(MAX_TO_TG))
+@max_router.message_created(F.message.recipient.chat_id.in_(MAX_TO_TG))
 async def on_max_message(event: MessageCreated):
     chat_id = event.message.recipient.chat_id
     if not chat_id:
@@ -321,7 +323,7 @@ async def on_max_message(event: MessageCreated):
         )
 
 
-@max_dp.message_edited(F.message.recipient.chat_id.in_(MAX_TO_TG))
+@max_router.message_edited(F.message.recipient.chat_id.in_(MAX_TO_TG))
 async def on_max_message_edited(event: MessageEdited):
     chat_id = event.message.recipient.chat_id
     if not chat_id:
