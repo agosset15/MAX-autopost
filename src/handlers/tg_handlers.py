@@ -9,13 +9,16 @@ from typing import TypeAlias, Union
 from aiogram import F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message as TgMessage, Video, PhotoSize, Document, Audio
+from maxapi.enums.message_link_type import MessageLinkType
 from maxapi.enums.parse_mode import ParseMode
 from maxapi.enums.upload_type import UploadType
 from maxapi.exceptions import MaxApiError
-from maxapi.types import InputMedia
+from maxapi.methods.types.sended_message import SendedMessage
+from maxapi.types import InputMedia, NewMessageLink
 
 from src.config import CHANNEL_MAP, GROUP_MAP
-from src.loader import tg_dp, tg_bot, max_bot
+from src.loader import max_bot, message_map, tg_bot, tg_dp
+from src.storage.message_map import MaxRef, TgRef
 
 
 media_groups: dict[str, list[TgMessage]] = {}
@@ -24,13 +27,29 @@ _bg_tasks: set[asyncio.Task] = set()
 AnyMedia: TypeAlias = Union[Video, PhotoSize, Document, Audio]
 
 
-async def _safe_max_send(**kwargs):
+async def _safe_max_send(**kwargs) -> SendedMessage | None:
     """Send to MAX as HTML; on API rejection (e.g. unsupported tag) retry as plain text."""
     try:
-        await max_bot.send_message(parse_mode=ParseMode.HTML, **kwargs)
+        return await max_bot.send_message(parse_mode=ParseMode.HTML, **kwargs)
     except MaxApiError as e:
         logging.warning("MAX send failed (%s); retrying as plain text", e)
-        await max_bot.send_message(parse_mode=None, **kwargs)
+        return await max_bot.send_message(parse_mode=None, **kwargs)
+
+
+def _extract_mid(sent: SendedMessage | None) -> str | None:
+    if sent is None or sent.message is None or sent.message.body is None:
+        return None
+    return sent.message.body.mid
+
+
+async def _resolve_reply_link(message: TgMessage) -> NewMessageLink | None:
+    """If TG message is a reply, look up the matching MAX mid and build a REPLY link."""
+    if not message.reply_to_message:
+        return None
+    mx = await message_map.get_max(message.chat.id, message.reply_to_message.message_id)
+    if mx is None:
+        return None
+    return NewMessageLink(type=MessageLinkType.REPLY, mid=mx.mid)
 
 
 # ====== REGEX ======
@@ -128,22 +147,23 @@ async def send_media(
     upload_type: UploadType,
     text: str,
     max_id: int,
-) -> bool:
-    """Returns True on success, False if file is too large to download."""
+    link: NewMessageLink | None = None,
+) -> SendedMessage | None:
+    """Returns SendedMessage on success, None if file too large to download or send failed."""
     try:
         temp_path = await download_to_temp(file, suffix)
     except (TelegramBadRequest, ValueError) as e:
         logging.warning("Cannot download file: %s", e)
-        return False
+        return None
 
     try:
         media = InputMedia(temp_path, upload_type)
-        await _safe_max_send(
+        return await _safe_max_send(
             chat_id=max_id,
             text=text,
             attachments=[media],
+            link=link,
         )
-        return True
     finally:
         _cleanup_temp(temp_path)
 
@@ -159,6 +179,7 @@ async def send_media_group(media_group_id: str, max_id: int):
 
     messages.sort(key=lambda m: m.message_id)
     text = next((extract_text(m) for m in messages if m.caption), None)
+    link = await _resolve_reply_link(messages[0])
 
     temp_files: list[str] = []
     attachments: list[InputMedia] = []
@@ -184,10 +205,11 @@ async def send_media_group(media_group_id: str, max_id: int):
             attachments.append(InputMedia(path, upload_type))
 
         if attachments:
-            await _safe_max_send(
+            sent = await _safe_max_send(
                 chat_id=max_id,
                 text=text,
                 attachments=attachments,
+                link=link,
             )
             logging.info(
                 "Forwarded media group %s (%d items) to MAX channel %d",
@@ -195,6 +217,10 @@ async def send_media_group(media_group_id: str, max_id: int):
                 len(attachments),
                 max_id,
             )
+            mid = _extract_mid(sent)
+            if mid:
+                tg_refs = [TgRef(chat_id=m.chat.id, message_id=m.message_id) for m in messages]
+                await message_map.bind_many(tg_refs, MaxRef(chat_id=max_id, mid=mid))
 
     except Exception as e:
         logging.exception("Media group error: %s", e)
@@ -234,6 +260,8 @@ async def forward_to_max(message: TgMessage, max_id: int):
         return
 
     text = extract_text(message)
+    link = await _resolve_reply_link(message)
+    tg_ref = TgRef(chat_id=message.chat.id, message_id=message.message_id)
 
     # single media
     for attr, (suffix, upload_type) in MEDIA_HANDLERS.items():
@@ -244,15 +272,19 @@ async def forward_to_max(message: TgMessage, max_id: int):
                 if isinstance(media_obj, list)
                 else media_obj
             )
-            ok = await send_media(
+            sent = await send_media(
                 file=file,
                 suffix=suffix,
                 upload_type=upload_type,
                 text=text,
                 max_id=max_id,
+                link=link,
             )
-            if ok:
+            if sent is not None:
                 logging.info("Forwarded %s to MAX channel %d", attr, max_id)
+                mid = _extract_mid(sent)
+                if mid:
+                    await message_map.bind(tg_ref, MaxRef(chat_id=max_id, mid=mid))
             else:
                 logging.warning(
                     "Skipped %s (post %s) in chat %s — file too large for Bot API",
@@ -262,8 +294,38 @@ async def forward_to_max(message: TgMessage, max_id: int):
 
     # text only
     if text:
-        await _safe_max_send(chat_id=max_id, text=text)
+        sent = await _safe_max_send(chat_id=max_id, text=text, link=link)
         logging.info("Forwarded text to MAX id %d", max_id)
+        mid = _extract_mid(sent)
+        if mid:
+            await message_map.bind(tg_ref, MaxRef(chat_id=max_id, mid=mid))
+
+
+# ====== EDIT FORWARDING ======
+
+async def forward_edit_to_max(message: TgMessage):
+    """Propagate TG edit to MAX by looking up the bound MAX mid."""
+    mx = await message_map.get_max(message.chat.id, message.message_id)
+    if mx is None:
+        logging.info(
+            "Edit ignored: no MAX mapping for TG (%s, %s)",
+            message.chat.id, message.message_id,
+        )
+        return
+
+    text = extract_text(message)
+    if not text:
+        return
+
+    try:
+        await max_bot.edit_message(message_id=mx.mid, text=text, parse_mode=ParseMode.HTML)
+        logging.info("Edited MAX %s after TG edit", mx.mid)
+    except MaxApiError as e:
+        logging.warning("MAX edit failed as HTML (%s); retrying as plain text", e)
+        try:
+            await max_bot.edit_message(message_id=mx.mid, text=text, parse_mode=None)
+        except MaxApiError as e2:
+            logging.warning("MAX edit failed (%s)", e2)
 
 
 # ====== MAIN HANDLERS ======
@@ -287,3 +349,17 @@ async def on_group_message(message: TgMessage):
             return
 
     await forward_to_max(message, cfg.chat_id)
+
+
+@tg_dp.edited_channel_post(F.chat.id.in_(CHANNEL_MAP))
+async def on_channel_post_edited(message: TgMessage):
+    await forward_edit_to_max(message)
+
+
+@tg_dp.edited_message(F.chat.id.in_(GROUP_MAP))
+async def on_group_message_edited(message: TgMessage):
+    cfg = GROUP_MAP[message.chat.id]
+    if cfg.allowed_user_ids is not None:
+        if not message.from_user or message.from_user.id not in cfg.allowed_user_ids:
+            return
+    await forward_edit_to_max(message)

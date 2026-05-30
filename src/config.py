@@ -39,6 +39,9 @@ PROXY_URL = os.getenv("PROXY_URL", None)
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+MESSAGE_MAP_TTL = int(os.getenv("MESSAGE_MAP_TTL", str(10 * 24 * 60 * 60)))
+
 # Channel mapping
 _CHANNELS_FILE = os.getenv("CHANNELS_FILE", "channels.json")
 

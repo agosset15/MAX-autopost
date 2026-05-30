@@ -16,13 +16,15 @@ from src.config import (
     WEBHOOK_PORT,
     WEBHOOK_SECRET,
 )
-from src.loader import max_bot, max_dp, tg_bot, tg_dp
+from src.loader import max_bot, max_dp, message_map, tg_bot, tg_dp
 
 logging.basicConfig(level=logging.INFO, force=True)
 
 
 async def main():
     logging.info("Starting bots...")
+
+    await message_map.connect()
 
     max_bot.me = await max_bot.get_me()
 
@@ -63,6 +65,7 @@ async def main():
         await runner.cleanup()
         await tg_bot.delete_webhook()
         await max_bot.delete_webhook()
+        await message_map.close()
         logging.info("Shutdown complete")
 
 

@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
     ports:
       - "9154:9154"
     volumes:
@@ -12,8 +14,32 @@ services:
       - ./channels.json:/app/channels.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
         max-size: 100m
         max-file: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: max-autopost-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: 3
+
+volumes:
+  redis-data:
