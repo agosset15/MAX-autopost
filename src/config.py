@@ -60,6 +60,7 @@ class GroupConfig:
     chat_id: int
     allowed_user_ids: frozenset[int] | None
     allowed_thread_ids: frozenset[int] | None
+    sign_names: bool = False
 
 
 def _opt_set(value: Optional[list[str]]) -> frozenset[int] | None:
@@ -79,6 +80,8 @@ for _e in _entries:
     _tg_id = int(_e["tg_id"])
     _max_id = int(_e["max_id"])
 
+    _sign_names = bool(_e.get("sign_names", False))
+
     if _direction == "max_to_tg":
         if _e.get("allowed_thread_ids"):
             logging.warning(
@@ -90,6 +93,7 @@ for _e in _entries:
             chat_id=_tg_id,
             allowed_user_ids=_opt_set(_e.get("allowed_user_ids")),
             allowed_thread_ids=None,
+            sign_names=_sign_names,
         )
         continue
 
@@ -97,12 +101,18 @@ for _e in _entries:
         raise RuntimeError(f"Unknown direction: {_direction!r}")
 
     if _entry_type == "channel":
+        if _sign_names:
+            logging.warning(
+                "Entry tg_id=%d max_id=%d: sign_names ignored (type=channel, only type=group supported).",
+                _tg_id, _max_id,
+            )
         CHANNEL_MAP[_tg_id] = _max_id
     elif _entry_type == "group":
         GROUP_MAP[_tg_id] = GroupConfig(
             chat_id=_max_id,
             allowed_user_ids=_opt_set(_e.get("allowed_user_ids")),
             allowed_thread_ids=_opt_set(_e.get("allowed_thread_ids")),
+            sign_names=_sign_names,
         )
     else:
         raise RuntimeError(f"Unknown entry type: {_entry_type!r}")

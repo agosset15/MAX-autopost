@@ -9,13 +9,15 @@
     "tg_id": -1001000000003,
     "max_id": -71000000000003,
     "allowed_user_ids": [123456789, 987654321],
-    "allowed_thread_ids": [12, 45]
+    "allowed_thread_ids": [12, 45],
+    "sign_names": true
   },
   {
     "type": "channel",
     "tg_id": -1001000000004,
     "max_id": -71000000000004,
     "direction": "max_to_tg",
-    "allowed_user_ids": [123456789, 987654321]
+    "allowed_user_ids": [123456789, 987654321],
+    "sign_names": true
   }
 ]

@@ -1,3 +1,4 @@
+import html
 import logging
 import os
 import tempfile
@@ -24,6 +25,29 @@ async def bot_started(event: BotStarted):
         chat_id=event.chat_id,
         text='Привет! Отправь мне /start'
     )
+
+
+# ====== SIGN UTILS ======
+
+def build_sign_prefix(sender) -> str:
+    """Build HTML signature prefix `<b>Name</b>:\\n` for MAX -> TG sign_names mode."""
+    if not sender:
+        return ""
+    name = getattr(sender, "full_name", None) or getattr(sender, "first_name", None)
+    if not name:
+        username = getattr(sender, "username", None)
+        name = f"@{username}" if username else ""
+    if not name:
+        return ""
+    return f"<b>{html.escape(name)}</b>:\n"
+
+
+def _apply_prefix(prefix: str, text: str | None) -> str | None:
+    if not prefix:
+        return text
+    if not text:
+        return prefix.rstrip(":\n")
+    return prefix + text
 
 
 # ====== TEMP UTILS ======
@@ -161,7 +185,7 @@ async def _resolve_reply_to(message, tg_id: int) -> int | None:
     return tg_ref.message_id
 
 
-async def forward_to_tg(message, tg_id: int) -> int | None:
+async def forward_to_tg(message, tg_id: int, sender_prefix: str = "") -> int | None:
     """Forward MAX message to TG. Returns the primary TG message_id on success."""
     body = message.body
     text = None
@@ -169,6 +193,7 @@ async def forward_to_tg(message, tg_id: int) -> int | None:
     if body:
         text = body.html_text or body.text
         attachments = body.attachments or []
+    text = _apply_prefix(sender_prefix, text)
 
     media_atts = [a for a in attachments
                   if a.type in (AttachmentType.IMAGE, AttachmentType.VIDEO)]
@@ -256,7 +281,7 @@ async def forward_to_tg(message, tg_id: int) -> int | None:
 
 # ====== EDIT FORWARDING ======
 
-async def forward_edit_to_tg(message, tg_id: int):
+async def forward_edit_to_tg(message, tg_id: int, sender_prefix: str = ""):
     """Propagate MAX edit to TG by looking up the bound TG message_id."""
     max_chat_id = message.recipient.chat_id
     body = message.body
@@ -268,7 +293,7 @@ async def forward_edit_to_tg(message, tg_id: int):
         logging.info("Edit ignored: no TG mapping for MAX (%s, %s)", max_chat_id, body.mid)
         return
 
-    text = body.html_text or body.text
+    text = _apply_prefix(sender_prefix, body.html_text or body.text)
     if not text:
         return
 
@@ -314,7 +339,8 @@ async def on_max_message(event: MessageCreated):
             return
 
     logging.info("New MAX message in chat %s -> TG %d", chat_id, cfg.chat_id)
-    primary_tg_id = await forward_to_tg(event.message, cfg.chat_id)
+    sender_prefix = build_sign_prefix(sender) if cfg.sign_names else ""
+    primary_tg_id = await forward_to_tg(event.message, cfg.chat_id, sender_prefix=sender_prefix)
     body = event.message.body
     if primary_tg_id is not None and body is not None:
         await message_map.bind(
@@ -339,4 +365,5 @@ async def on_max_message_edited(event: MessageEdited):
             return
 
     logging.info("MAX message edited in chat %s -> TG %d", chat_id, cfg.chat_id)
-    await forward_edit_to_tg(event.message, cfg.chat_id)
+    sender_prefix = build_sign_prefix(sender) if cfg.sign_names else ""
+    await forward_edit_to_tg(event.message, cfg.chat_id, sender_prefix=sender_prefix)

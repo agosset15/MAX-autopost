@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import mimetypes
 import os
@@ -22,6 +23,7 @@ from src.storage.message_map import MaxRef, TgRef
 
 
 media_groups: dict[str, list[TgMessage]] = {}
+media_group_prefixes: dict[str, str] = {}
 _bg_tasks: set[asyncio.Task] = set()
 
 AnyMedia: TypeAlias = Union[Video, PhotoSize, Document, Audio]
@@ -86,6 +88,26 @@ def clean_html(html: str) -> str:
 
 def extract_text(message: TgMessage) -> str:
     return clean_html(message.html_text or "")
+
+
+def build_sign_prefix(message: TgMessage) -> str:
+    """Build HTML signature prefix `<b>Name</b>:\\n` for group sign_names mode."""
+    u = message.from_user
+    if not u:
+        return ""
+    name = u.full_name or u.first_name or (f"@{u.username}" if u.username else "")
+    if not name:
+        return ""
+    safe = html.escape(name)
+    if u.username:
+        return f'<b><a href="https://t.me/{u.username}">{safe}</a></b>:\n'
+    return f"<b>{safe}</b>:\n"
+
+
+def _apply_prefix(prefix: str, text: str) -> str:
+    if not prefix:
+        return text
+    return prefix + text if text else prefix.rstrip(":\n")
 
 
 # ====== FILE UTILS ======
@@ -176,11 +198,14 @@ async def send_media_group(media_group_id: str, max_id: int):
     await asyncio.sleep(2)
 
     messages = media_groups.pop(media_group_id, [])
+    prefix = media_group_prefixes.pop(media_group_id, "")
     if not messages:
         return
 
     messages.sort(key=lambda m: m.message_id)
     text = next((extract_text(m) for m in messages if m.caption), None)
+    if prefix:
+        text = _apply_prefix(prefix, text or "")
     link = await _resolve_reply_link(messages[0])
 
     temp_files: list[str] = []
@@ -244,7 +269,7 @@ MEDIA_HANDLERS = {
 
 # ====== FORWARDING ======
 
-async def forward_to_max(message: TgMessage, max_id: int):
+async def forward_to_max(message: TgMessage, max_id: int, sender_prefix: str = ""):
     logging.info(
         "New Telegram post %s in chat %s -> MAX id %d",
         message.message_id,
@@ -256,12 +281,14 @@ async def forward_to_max(message: TgMessage, max_id: int):
     if message.media_group_id:
         media_groups.setdefault(message.media_group_id, []).append(message)
         if len(media_groups[message.media_group_id]) == 1:
+            if sender_prefix:
+                media_group_prefixes[message.media_group_id] = sender_prefix
             task = asyncio.create_task(send_media_group(message.media_group_id, max_id))
             _bg_tasks.add(task)
             task.add_done_callback(_bg_tasks.discard)
         return
 
-    text = extract_text(message)
+    text = _apply_prefix(sender_prefix, extract_text(message))
     link = await _resolve_reply_link(message)
     tg_ref = TgRef(chat_id=message.chat.id, message_id=message.message_id)
 
@@ -305,7 +332,7 @@ async def forward_to_max(message: TgMessage, max_id: int):
 
 # ====== EDIT FORWARDING ======
 
-async def forward_edit_to_max(message: TgMessage):
+async def forward_edit_to_max(message: TgMessage, sender_prefix: str = ""):
     """Propagate TG edit to MAX by looking up the bound MAX mid."""
     mx = await message_map.get_max(message.chat.id, message.message_id)
     if mx is None:
@@ -315,7 +342,7 @@ async def forward_edit_to_max(message: TgMessage):
         )
         return
 
-    text = extract_text(message)
+    text = _apply_prefix(sender_prefix, extract_text(message))
     if not text:
         return
 
@@ -350,7 +377,8 @@ async def on_group_message(message: TgMessage):
                 int(bool(message.message_thread_id)) not in cfg.allowed_thread_ids):
             return
 
-    await forward_to_max(message, cfg.chat_id)
+    sender_prefix = build_sign_prefix(message) if cfg.sign_names else ""
+    await forward_to_max(message, cfg.chat_id, sender_prefix=sender_prefix)
 
 
 @tg_router.edited_channel_post(F.chat.id.in_(CHANNEL_MAP))
@@ -364,4 +392,5 @@ async def on_group_message_edited(message: TgMessage):
     if cfg.allowed_user_ids is not None:
         if not message.from_user or message.from_user.id not in cfg.allowed_user_ids:
             return
-    await forward_edit_to_max(message)
+    sender_prefix = build_sign_prefix(message) if cfg.sign_names else ""
+    await forward_edit_to_max(message, sender_prefix=sender_prefix)
