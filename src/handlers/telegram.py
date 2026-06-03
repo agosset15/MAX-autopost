@@ -318,7 +318,7 @@ async def forward_to_max(message: TgMessage, max_id: int, sender_prefix: str = "
                     await message_map.bind(tg_ref, MaxRef(chat_id=max_id, mid=mid))
             else:
                 logging.warning(
-                    "Skipped %s (post %s) in chat %s — file too large for Bot API",
+                    "Skipped %s (message %s) in chat %s — file too large for Bot API",
                     attr, message.message_id, message.chat.id,
                 )
             return
