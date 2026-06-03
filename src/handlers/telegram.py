@@ -17,7 +17,7 @@ from maxapi.exceptions import MaxApiError
 from maxapi.methods.types.sended_message import SendedMessage
 from maxapi.types import InputMedia, NewMessageLink
 
-from src.config import CHANNEL_MAP, GROUP_MAP
+from src.config import CHANNEL_MAP, GROUP_MAP, is_local_api
 from src.loader import max_bot, message_map, tg_bot
 from src.storage.message_map import MaxRef, TgRef
 
@@ -113,6 +113,8 @@ def _apply_prefix(prefix: str, text: str) -> str:
 # ====== FILE UTILS ======
 
 TG_FILE_SIZE_LIMIT = 20 * 1024 * 1024  # 20 MB — Telegram Bot API hard limit
+if is_local_api:
+    TG_FILE_SIZE_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB — local API hard limit
 
 
 def _resolve_suffix(file: AnyMedia, fallback: str | None) -> str:

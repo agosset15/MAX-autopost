@@ -36,6 +36,9 @@ if not WEBHOOK_SECRET:
     logging.warning("WEBHOOK_SECRET not set; generated a random ephemeral secret for this run.")
 
 PROXY_URL = os.getenv("PROXY_URL", None)
+BOTAPI_URL = os.getenv("BOTAPI_URL", None)
+BOTAPI_FILE_URL = os.getenv("BOTAPI_FILE_URL", None)
+is_local_api = BOTAPI_URL is not None and BOTAPI_FILE_URL is None
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
