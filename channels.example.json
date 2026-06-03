@@ -19,5 +19,14 @@
     "direction": "max_to_tg",
     "allowed_user_ids": [123456789, 987654321],
     "sign_names": true
+  },
+  {
+    "type": "group",
+    "tg_id": -1001000000005,
+    "max_id": -71000000000005,
+    "bidirectional": true,
+    "allowed_user_ids": [123456789, 987654321],
+    "allowed_thread_ids": [12, 45],
+    "sign_names": true
   }
 ]

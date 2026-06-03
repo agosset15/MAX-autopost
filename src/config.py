@@ -81,6 +81,32 @@ for _e in _entries:
     _max_id = int(_e["max_id"])
 
     _sign_names = bool(_e.get("sign_names", False))
+    _bidirectional = bool(_e.get("bidirectional", False))
+
+    if _bidirectional:
+        if _entry_type != "group":
+            raise RuntimeError(
+                f"Entry tg_id={_tg_id} max_id={_max_id}: bidirectional only supported for type=group."
+            )
+        if "direction" in _e:
+            logging.warning(
+                "Entry tg_id=%d max_id=%d: bidirectional=true, direction=%r ignored.",
+                _tg_id, _max_id, _direction,
+            )
+        _allowed_users = _opt_set(_e.get("allowed_user_ids"))
+        GROUP_MAP[_tg_id] = GroupConfig(
+            chat_id=_max_id,
+            allowed_user_ids=_allowed_users,
+            allowed_thread_ids=_opt_set(_e.get("allowed_thread_ids")),
+            sign_names=_sign_names,
+        )
+        MAX_TO_TG[_max_id] = GroupConfig(
+            chat_id=_tg_id,
+            allowed_user_ids=_allowed_users,
+            allowed_thread_ids=None,
+            sign_names=_sign_names,
+        )
+        continue
 
     if _direction == "max_to_tg":
         if _e.get("allowed_thread_ids"):
