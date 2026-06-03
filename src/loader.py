@@ -5,7 +5,7 @@ from aiogram.enums import ParseMode
 from maxapi import Bot as MaxBot, Dispatcher as MaxDispatcher
 from aiogram import Bot as TgBot, Dispatcher as TgDispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
-from src.config import (MAX_BOT_TOKEN, MESSAGE_MAP_TTL, PROXY_URL, REDIS_URL, TELEGRAM_BOT_TOKEN, BOTAPI_URL, BOTAPI_FILE_URL)
+from src.config import MAX_BOT_TOKEN, MESSAGE_MAP_TTL, PROXY_URL, REDIS_URL, TELEGRAM_BOT_TOKEN, BOTAPI_URL, BOTAPI_FILE_URL
 from src.storage.message_map import MessageMapService
 
 # Initialize Bots
@@ -14,7 +14,7 @@ max_dp = MaxDispatcher(router_id="main")
 
 session_kwargs: dict = {}
 if PROXY_URL:
-    session = AiohttpSession(proxy=PROXY_URL)
+    session_kwargs["proxy"] = PROXY_URL
 if BOTAPI_URL:
     if BOTAPI_FILE_URL:
         logging.info(f"Using custom Telegram Bot API server: {BOTAPI_URL} (file: {BOTAPI_FILE_URL})")
