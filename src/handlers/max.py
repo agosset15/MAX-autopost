@@ -12,7 +12,7 @@ from maxapi.types import BotStarted, MessageCreated
 from maxapi.types.updates.message_edited import MessageEdited
 from maxapi import F, Router
 
-from src.config import MAX_TO_TG
+from src.config import MAX_ROUTES, Route
 from src.loader import max_bot, message_map, tg_bot
 from src.storage.message_map import MaxRef, TgRef
 
@@ -69,6 +69,15 @@ async def _download(url: str) -> str:
     tmp_dir = tempfile.mkdtemp()
     path = await max_bot.download_file(url, tmp_dir)
     return str(path)
+
+
+async def _download_cached(url: str, cache: dict[str, str]) -> str:
+    """Download once per url; a MAX message fanned out to several TG chats reuses the file."""
+    path = cache.get(url)
+    if path is None:
+        path = await _download(url)
+        cache[url] = path
+    return path
 
 
 # ====== ATTACHMENT URL ======
@@ -169,7 +178,7 @@ SUPPORTED = {
 
 
 async def _resolve_reply_to(message, tg_id: int) -> int | None:
-    """If MAX message replies to another, look up matching TG message_id."""
+    """If MAX message replies to another, look up its copy inside `tg_id`."""
     link = getattr(message, "link", None)
     if not link or link.type != MessageLinkType.REPLY:
         return None
@@ -179,14 +188,24 @@ async def _resolve_reply_to(message, tg_id: int) -> int | None:
     max_chat_id = message.recipient.chat_id
     if max_chat_id is None:
         return None
-    tg_ref = await message_map.get_tg(max_chat_id, src_mid)
-    if tg_ref is None or tg_ref.chat_id != tg_id:
+    tg_ref = await message_map.get_tg_in(max_chat_id, src_mid, tg_id)
+    if tg_ref is None:
         return None
     return tg_ref.message_id
 
 
-async def forward_to_tg(message, tg_id: int, sender_prefix: str = "") -> int | None:
-    """Forward MAX message to TG. Returns the primary TG message_id on success."""
+async def forward_to_tg(
+    message, tg_id: int, sender_prefix: str = "", cache: dict[str, str] | None = None,
+) -> int | None:
+    """Forward MAX message to TG. Returns the primary TG message_id on success.
+
+    `cache` maps attachment url -> local path and is owned by the caller when
+    given (so one message fanned out to several TG chats downloads once); the
+    caller then cleans those files up via :func:`cleanup_cache`.
+    """
+    own_cache = cache is None
+    if cache is None:
+        cache = {}
     body = message.body
     text = None
     attachments = []
@@ -217,7 +236,6 @@ async def forward_to_tg(message, tg_id: int, sender_prefix: str = "") -> int | N
         return primary_tg_id
 
     caption = text
-    paths: list[str] = []
     try:
         downloaded: list[tuple] = []
         for att in media_atts:
@@ -225,11 +243,10 @@ async def forward_to_tg(message, tg_id: int, sender_prefix: str = "") -> int | N
             if not url:
                 continue
             try:
-                p = await _download(url)
+                p = await _download_cached(url, cache)
             except Exception as e:
                 logging.warning("MAX download failed (%s); skipping", e)
                 continue
-            paths.append(p)
             downloaded.append((att, p))
 
         try:
@@ -252,11 +269,10 @@ async def forward_to_tg(message, tg_id: int, sender_prefix: str = "") -> int | N
             if not url:
                 continue
             try:
-                p = await _download(url)
+                p = await _download_cached(url, cache)
             except Exception as e:
                 logging.warning("MAX download failed (%s); skipping", e)
                 continue
-            paths.append(p)
             try:
                 sent = await _send_single_media(tg_id, att, p, caption, reply_to=reply_to)
                 if sent is not None and primary_tg_id is None:
@@ -273,24 +289,32 @@ async def forward_to_tg(message, tg_id: int, sender_prefix: str = "") -> int | N
 
         logging.info("Forwarded MAX message -> TG %d", tg_id)
     finally:
-        for p in paths:
-            _cleanup(p)
+        if own_cache:
+            cleanup_cache(cache)
 
     return primary_tg_id
+
+
+def cleanup_cache(cache: dict[str, str]) -> None:
+    for path in cache.values():
+        _cleanup(path)
 
 
 # ====== EDIT FORWARDING ======
 
 async def forward_edit_to_tg(message, tg_id: int, sender_prefix: str = ""):
-    """Propagate MAX edit to TG by looking up the bound TG message_id."""
+    """Propagate a MAX edit to the copy of that message inside `tg_id`."""
     max_chat_id = message.recipient.chat_id
     body = message.body
     if max_chat_id is None or body is None:
         return
 
-    tg_ref = await message_map.get_tg(max_chat_id, body.mid)
+    tg_ref = await message_map.get_tg_in(max_chat_id, body.mid, tg_id)
     if tg_ref is None:
-        logging.info("Edit ignored: no TG mapping for MAX (%s, %s)", max_chat_id, body.mid)
+        logging.info(
+            "Edit ignored: no TG mapping for MAX (%s, %s) in TG %d",
+            max_chat_id, body.mid, tg_id,
+        )
         return
 
     text = _apply_prefix(sender_prefix, body.html_text or body.text)
@@ -322,7 +346,18 @@ async def forward_edit_to_tg(message, tg_id: int, sender_prefix: str = ""):
 
 # ====== MAIN HANDLERS ======
 
-@max_router.message_created(F.message.recipient.chat_id.in_(MAX_TO_TG))
+def _targets(chat_id: int, sender) -> list[tuple[Route, str]]:
+    """Routes leaving this MAX chat that accept `sender`, each with its prefix."""
+    out: list[tuple[Route, str]] = []
+    for route in MAX_ROUTES.get(chat_id, ()):
+        if route.allowed_user_ids is not None:
+            if sender and sender.user_id not in route.allowed_user_ids:
+                continue
+        out.append((route, build_sign_prefix(sender) if route.sign_names else ""))
+    return out
+
+
+@max_router.message_created(F.message.recipient.chat_id.in_(MAX_ROUTES))
 async def on_max_message(event: MessageCreated):
     chat_id = event.message.recipient.chat_id
     if not chat_id:
@@ -332,24 +367,32 @@ async def on_max_message(event: MessageCreated):
     if sender and max_bot.me and sender.user_id == max_bot.me.user_id:
         return  # ignore the bot's own messages
 
-    cfg = MAX_TO_TG[chat_id]
+    targets = _targets(chat_id, sender)
+    if not targets:
+        return
 
-    if cfg.allowed_user_ids is not None:
-        if sender and sender.user_id not in cfg.allowed_user_ids:
-            return
+    logging.info(
+        "New MAX message in chat %s -> TG ids %s",
+        chat_id, [route.tg_id for route, _ in targets],
+    )
 
-    logging.info("New MAX message in chat %s -> TG %d", chat_id, cfg.chat_id)
-    sender_prefix = build_sign_prefix(sender) if cfg.sign_names else ""
-    primary_tg_id = await forward_to_tg(event.message, cfg.chat_id, sender_prefix=sender_prefix)
     body = event.message.body
-    if primary_tg_id is not None and body is not None:
-        await message_map.bind(
-            TgRef(chat_id=cfg.chat_id, message_id=primary_tg_id),
-            MaxRef(chat_id=chat_id, mid=body.mid),
-        )
+    cache: dict[str, str] = {}
+    try:
+        for route, sender_prefix in targets:
+            primary_tg_id = await forward_to_tg(
+                event.message, route.tg_id, sender_prefix=sender_prefix, cache=cache,
+            )
+            if primary_tg_id is not None and body is not None:
+                await message_map.bind(
+                    TgRef(chat_id=route.tg_id, message_id=primary_tg_id),
+                    MaxRef(chat_id=chat_id, mid=body.mid),
+                )
+    finally:
+        cleanup_cache(cache)
 
 
-@max_router.message_edited(F.message.recipient.chat_id.in_(MAX_TO_TG))
+@max_router.message_edited(F.message.recipient.chat_id.in_(MAX_ROUTES))
 async def on_max_message_edited(event: MessageEdited):
     chat_id = event.message.recipient.chat_id
     if not chat_id:
@@ -359,11 +402,6 @@ async def on_max_message_edited(event: MessageEdited):
     if sender and max_bot.me and sender.user_id == max_bot.me.user_id:
         return
 
-    cfg = MAX_TO_TG[chat_id]
-    if cfg.allowed_user_ids is not None:
-        if sender and sender.user_id not in cfg.allowed_user_ids:
-            return
-
-    logging.info("MAX message edited in chat %s -> TG %d", chat_id, cfg.chat_id)
-    sender_prefix = build_sign_prefix(sender) if cfg.sign_names else ""
-    await forward_edit_to_tg(event.message, cfg.chat_id, sender_prefix=sender_prefix)
+    for route, sender_prefix in _targets(chat_id, sender):
+        logging.info("MAX message edited in chat %s -> TG %d", chat_id, route.tg_id)
+        await forward_edit_to_tg(event.message, route.tg_id, sender_prefix=sender_prefix)

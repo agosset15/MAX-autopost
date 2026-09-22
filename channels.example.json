@@ -5,6 +5,11 @@
     "max_id": -71000000000001
   },
   {
+    "type": "channel",
+    "tg_id": -1001000000001,
+    "max_id": -71000000000002
+  },
+  {
     "type": "group",
     "tg_id": -1001000000003,
     "max_id": -71000000000003,
@@ -19,6 +24,12 @@
     "direction": "max_to_tg",
     "allowed_user_ids": [123456789, 987654321],
     "sign_names": true
+  },
+  {
+    "type": "channel",
+    "tg_id": -1001000000006,
+    "max_id": -71000000000004,
+    "direction": "max_to_tg"
   },
   {
     "type": "group",

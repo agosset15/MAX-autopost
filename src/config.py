@@ -59,10 +59,18 @@ except FileNotFoundError:
 
 
 @dataclass(frozen=True)
-class GroupConfig:
-    chat_id: int
-    allowed_user_ids: frozenset[int] | None
-    allowed_thread_ids: frozenset[int] | None
+class Route:
+    """One directed source -> destination edge.
+
+    Every entry in channels.json produces one Route per direction it enables.
+    Both endpoints may appear in many routes: one tg_id can fan out to several
+    max_id, and one max_id can fan out to several tg_id.
+    """
+
+    tg_id: int
+    max_id: int
+    allowed_user_ids: frozenset[int] | None = None
+    allowed_thread_ids: frozenset[int] | None = None
     sign_names: bool = False
 
 
@@ -70,12 +78,27 @@ def _opt_set(value: Optional[list[str]]) -> frozenset[int] | None:
     return frozenset(int(x) for x in value) if value else None
 
 
-# tg_id -> chat_id
-CHANNEL_MAP: dict[int, int] = {}
-# tg_id -> GroupConfig
-GROUP_MAP: dict[int, GroupConfig] = {}
-# chat_id -> tg_id
-MAX_TO_TG: dict[int, GroupConfig] = {}
+# tg_id -> routes fed by channel_post updates
+TG_CHANNEL_ROUTES: dict[int, list[Route]] = {}
+# tg_id -> routes fed by group/supergroup message updates
+TG_GROUP_ROUTES: dict[int, list[Route]] = {}
+# max_id -> routes fed by MAX message updates
+MAX_ROUTES: dict[int, list[Route]] = {}
+
+# (map name, tg_id, max_id) already seen — duplicate edges would double-post
+_seen: set[tuple[str, int, int]] = set()
+
+
+def _add(table: dict[int, list[Route]], name: str, key: int, route: Route) -> None:
+    edge = (name, route.tg_id, route.max_id)
+    if edge in _seen:
+        raise RuntimeError(
+            f"Duplicate {name} route tg_id={route.tg_id} max_id={route.max_id} "
+            f"in '{_CHANNELS_FILE}' — it would forward the same message twice."
+        )
+    _seen.add(edge)
+    table.setdefault(key, []).append(route)
+
 
 for _e in _entries:
     _entry_type = _e.get("type", "channel")
@@ -85,6 +108,11 @@ for _e in _entries:
 
     _sign_names = bool(_e.get("sign_names", False))
     _bidirectional = bool(_e.get("bidirectional", False))
+    _allowed_users = _opt_set(_e.get("allowed_user_ids"))
+    _allowed_threads = _opt_set(_e.get("allowed_thread_ids"))
+
+    if _entry_type not in ("channel", "group"):
+        raise RuntimeError(f"Unknown entry type: {_entry_type!r}")
 
     if _bidirectional:
         if _entry_type != "group":
@@ -96,34 +124,36 @@ for _e in _entries:
                 "Entry tg_id=%d max_id=%d: bidirectional=true, direction=%r ignored.",
                 _tg_id, _max_id, _direction,
             )
-        _allowed_users = _opt_set(_e.get("allowed_user_ids"))
-        GROUP_MAP[_tg_id] = GroupConfig(
-            chat_id=_max_id,
+        _add(TG_GROUP_ROUTES, "tg_to_max", _tg_id, Route(
+            tg_id=_tg_id,
+            max_id=_max_id,
             allowed_user_ids=_allowed_users,
-            allowed_thread_ids=_opt_set(_e.get("allowed_thread_ids")),
+            allowed_thread_ids=_allowed_threads,
             sign_names=_sign_names,
-        )
-        MAX_TO_TG[_max_id] = GroupConfig(
-            chat_id=_tg_id,
+        ))
+        _add(MAX_ROUTES, "max_to_tg", _max_id, Route(
+            tg_id=_tg_id,
+            max_id=_max_id,
             allowed_user_ids=_allowed_users,
             allowed_thread_ids=None,
             sign_names=_sign_names,
-        )
+        ))
         continue
 
     if _direction == "max_to_tg":
-        if _e.get("allowed_thread_ids"):
+        if _allowed_threads:
             logging.warning(
-                "Entry tg_id=%d chat_id=%d is max_to_tg; "
+                "Entry tg_id=%d max_id=%d is max_to_tg; "
                 "allowed_thread_ids are ignored in max_to_tg direction.",
                 _tg_id, _max_id,
             )
-        MAX_TO_TG[_max_id] = GroupConfig(
-            chat_id=_tg_id,
-            allowed_user_ids=_opt_set(_e.get("allowed_user_ids")),
+        _add(MAX_ROUTES, "max_to_tg", _max_id, Route(
+            tg_id=_tg_id,
+            max_id=_max_id,
+            allowed_user_ids=_allowed_users,
             allowed_thread_ids=None,
             sign_names=_sign_names,
-        )
+        ))
         continue
 
     if _direction != "tg_to_max":
@@ -135,16 +165,33 @@ for _e in _entries:
                 "Entry tg_id=%d max_id=%d: sign_names ignored (type=channel, only type=group supported).",
                 _tg_id, _max_id,
             )
-        CHANNEL_MAP[_tg_id] = _max_id
-    elif _entry_type == "group":
-        GROUP_MAP[_tg_id] = GroupConfig(
-            chat_id=_max_id,
-            allowed_user_ids=_opt_set(_e.get("allowed_user_ids")),
-            allowed_thread_ids=_opt_set(_e.get("allowed_thread_ids")),
-            sign_names=_sign_names,
-        )
+        if _allowed_users or _allowed_threads:
+            logging.warning(
+                "Entry tg_id=%d max_id=%d: allowed_user_ids/allowed_thread_ids ignored "
+                "(type=channel — channel posts carry no sender or thread).",
+                _tg_id, _max_id,
+            )
+        # Channel posts have no from_user and no thread, so filters cannot apply.
+        _add(TG_CHANNEL_ROUTES, "tg_to_max", _tg_id, Route(tg_id=_tg_id, max_id=_max_id))
     else:
-        raise RuntimeError(f"Unknown entry type: {_entry_type!r}")
+        _add(TG_GROUP_ROUTES, "tg_to_max", _tg_id, Route(
+            tg_id=_tg_id,
+            max_id=_max_id,
+            allowed_user_ids=_allowed_users,
+            allowed_thread_ids=_allowed_threads,
+            sign_names=_sign_names,
+        ))
 
-if not CHANNEL_MAP and not GROUP_MAP and not MAX_TO_TG:
+if not TG_CHANNEL_ROUTES and not TG_GROUP_ROUTES and not MAX_ROUTES:
     raise RuntimeError(f"'{_CHANNELS_FILE}' contains no mappings.")
+
+# A channel mirrored in both directions loops: the bot's own channel_post comes
+# back as an update. Groups are safe — TG does not deliver the bot's own messages.
+for _tg_id, _routes in TG_CHANNEL_ROUTES.items():
+    for _r in _routes:
+        if any(_back.tg_id == _tg_id for _back in MAX_ROUTES.get(_r.max_id, ())):
+            logging.warning(
+                "Mirrored channel pair tg_id=%d max_id=%d (tg_to_max + max_to_tg): "
+                "channel posts made by the bot will be forwarded back and loop.",
+                _tg_id, _r.max_id,
+            )

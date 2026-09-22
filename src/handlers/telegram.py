@@ -17,16 +17,18 @@ from maxapi.exceptions import MaxApiError
 from maxapi.methods.types.sended_message import SendedMessage
 from maxapi.types import InputMedia, NewMessageLink
 
-from src.config import CHANNEL_MAP, GROUP_MAP, is_local_api
+from src.config import TG_CHANNEL_ROUTES, TG_GROUP_ROUTES, Route, is_local_api
 from src.loader import max_bot, message_map, tg_bot
 from src.storage.message_map import MaxRef, TgRef
 
 
 media_groups: dict[str, list[TgMessage]] = {}
-media_group_prefixes: dict[str, str] = {}
+media_group_targets: dict[str, list["Target"]] = {}
 _bg_tasks: set[asyncio.Task] = set()
 
 AnyMedia: TypeAlias = Union[Video, PhotoSize, Document, Audio]
+# One destination of a TG message: the route plus the signature prefix it wants.
+Target: TypeAlias = tuple[Route, str]
 
 tg_router = Router()
 
@@ -46,11 +48,11 @@ def _extract_mid(sent: SendedMessage | None) -> str | None:
     return sent.message.body.mid
 
 
-async def _resolve_reply_link(message: TgMessage) -> NewMessageLink | None:
-    """If TG message is a reply, look up the matching MAX mid and build a REPLY link."""
+async def _resolve_reply_link(message: TgMessage, max_id: int) -> NewMessageLink | None:
+    """If TG message is a reply, look up the mid it maps to in `max_id` and build a REPLY link."""
     if not message.reply_to_message:
         return None
-    mx = await message_map.get_max(message.chat.id, message.reply_to_message.message_id)
+    mx = await message_map.get_max_in(message.chat.id, message.reply_to_message.message_id, max_id)
     if mx is None:
         return None
     return NewMessageLink(type=MessageLinkType.REPLY, mid=mx.mid)
@@ -196,22 +198,20 @@ async def send_media(
 
 # ====== MEDIA GROUP ======
 
-async def send_media_group(media_group_id: str, max_id: int):
+async def send_media_group(media_group_id: str):
+    """Flush one TG album: download every item once, then post it to each target."""
     await asyncio.sleep(2)
 
     messages = media_groups.pop(media_group_id, [])
-    prefix = media_group_prefixes.pop(media_group_id, "")
-    if not messages:
+    targets = media_group_targets.pop(media_group_id, [])
+    if not messages or not targets:
         return
 
     messages.sort(key=lambda m: m.message_id)
-    text = next((extract_text(m) for m in messages if m.caption), None)
-    if prefix:
-        text = _apply_prefix(prefix, text or "")
-    link = await _resolve_reply_link(messages[0])
+    base_text = next((extract_text(m) for m in messages if m.caption), None)
 
     temp_files: list[str] = []
-    attachments: list[InputMedia] = []
+    specs: list[tuple[str, UploadType]] = []
 
     try:
         for msg in messages:
@@ -231,25 +231,38 @@ async def send_media_group(media_group_id: str, max_id: int):
                 continue
 
             temp_files.append(path)
-            attachments.append(InputMedia(path, upload_type))
+            specs.append((path, upload_type))
 
-        if attachments:
-            sent = await _safe_max_send(
-                chat_id=max_id,
-                text=text,
-                attachments=attachments,
-                link=link,
-            )
+        if not specs:
+            return
+
+        tg_refs = [TgRef(chat_id=m.chat.id, message_id=m.message_id) for m in messages]
+
+        for route, prefix in targets:
+            text = _apply_prefix(prefix, base_text or "") if prefix else base_text
+            link = await _resolve_reply_link(messages[0], route.max_id)
+            try:
+                sent = await _safe_max_send(
+                    chat_id=route.max_id,
+                    text=text,
+                    attachments=[InputMedia(path, upload_type) for path, upload_type in specs],
+                    link=link,
+                )
+            except Exception as e:
+                logging.exception(
+                    "Media group %s -> MAX %d failed: %s", media_group_id, route.max_id, e
+                )
+                continue
+
             logging.info(
                 "Forwarded media group %s (%d items) to MAX channel %d",
                 media_group_id,
-                len(attachments),
-                max_id,
+                len(specs),
+                route.max_id,
             )
             mid = _extract_mid(sent)
             if mid:
-                tg_refs = [TgRef(chat_id=m.chat.id, message_id=m.message_id) for m in messages]
-                await message_map.bind_many(tg_refs, MaxRef(chat_id=max_id, mid=mid))
+                await message_map.bind_many(tg_refs, MaxRef(chat_id=route.max_id, mid=mid))
 
     except Exception as e:
         logging.exception("Media group error: %s", e)
@@ -269,29 +282,63 @@ MEDIA_HANDLERS = {
 }
 
 
+# ====== ROUTING ======
+
+def _passes(route: Route, message: TgMessage, check_threads: bool) -> bool:
+    if route.allowed_user_ids is not None:
+        if not message.from_user or message.from_user.id not in route.allowed_user_ids:
+            return False
+
+    if check_threads and route.allowed_thread_ids is not None:
+        if (message.message_thread_id not in route.allowed_thread_ids and
+                int(bool(message.message_thread_id)) not in route.allowed_thread_ids):
+            return False
+
+    return True
+
+
+def _targets(routes: list[Route], message: TgMessage, check_threads: bool) -> list[Target]:
+    """Routes this message may travel, each paired with the signature prefix it wants."""
+    return [
+        (route, build_sign_prefix(message) if route.sign_names else "")
+        for route in routes
+        if _passes(route, message, check_threads)
+    ]
+
+
 # ====== FORWARDING ======
 
-async def forward_to_max(message: TgMessage, max_id: int, sender_prefix: str = ""):
+async def forward_to_max(message: TgMessage, targets: list[Target]):
+    """Forward one TG message to every MAX chat it is routed to."""
+    if not targets:
+        return
+
     logging.info(
-        "New Telegram post %s in chat %s -> MAX id %d",
+        "New Telegram post %s in chat %s -> MAX ids %s",
         message.message_id,
         message.chat.id,
-        max_id,
+        [route.max_id for route, _ in targets],
     )
 
-    # media group
+    # media group — buffered once, flushed to every target together
     if message.media_group_id:
+        first = message.media_group_id not in media_groups
         media_groups.setdefault(message.media_group_id, []).append(message)
-        if len(media_groups[message.media_group_id]) == 1:
-            if sender_prefix:
-                media_group_prefixes[message.media_group_id] = sender_prefix
-            task = asyncio.create_task(send_media_group(message.media_group_id, max_id))
+        if first:
+            media_group_targets[message.media_group_id] = targets
+            task = asyncio.create_task(send_media_group(message.media_group_id))
             _bg_tasks.add(task)
             task.add_done_callback(_bg_tasks.discard)
         return
 
+    for route, prefix in targets:
+        await forward_one_to_max(message, route.max_id, prefix)
+
+
+async def forward_one_to_max(message: TgMessage, max_id: int, sender_prefix: str = ""):
+    """Forward a single (non-album) TG message to one MAX chat."""
     text = _apply_prefix(sender_prefix, extract_text(message))
-    link = await _resolve_reply_link(message)
+    link = await _resolve_reply_link(message, max_id)
     tg_ref = TgRef(chat_id=message.chat.id, message_id=message.message_id)
 
     # single media
@@ -334,65 +381,49 @@ async def forward_to_max(message: TgMessage, max_id: int, sender_prefix: str = "
 
 # ====== EDIT FORWARDING ======
 
-async def forward_edit_to_max(message: TgMessage, sender_prefix: str = ""):
-    """Propagate TG edit to MAX by looking up the bound MAX mid."""
-    mx = await message_map.get_max(message.chat.id, message.message_id)
-    if mx is None:
-        logging.info(
-            "Edit ignored: no MAX mapping for TG (%s, %s)",
-            message.chat.id, message.message_id,
-        )
-        return
+async def forward_edit_to_max(message: TgMessage, targets: list[Target]):
+    """Propagate a TG edit to every MAX copy of that message."""
+    for route, prefix in targets:
+        mx = await message_map.get_max_in(message.chat.id, message.message_id, route.max_id)
+        if mx is None:
+            logging.info(
+                "Edit ignored: no MAX mapping for TG (%s, %s) in MAX %d",
+                message.chat.id, message.message_id, route.max_id,
+            )
+            continue
 
-    text = _apply_prefix(sender_prefix, extract_text(message))
-    if not text:
-        return
+        text = _apply_prefix(prefix, extract_text(message))
+        if not text:
+            continue
 
-    try:
-        await max_bot.edit_message(message_id=mx.mid, text=text, parse_mode=ParseMode.HTML)
-        logging.info("Edited MAX %s after TG edit", mx.mid)
-    except MaxApiError as e:
-        logging.warning("MAX edit failed as HTML (%s); retrying as plain text", e)
         try:
-            await max_bot.edit_message(message_id=mx.mid, text=text, parse_mode=None)
-        except MaxApiError as e2:
-            logging.warning("MAX edit failed (%s)", e2)
+            await max_bot.edit_message(message_id=mx.mid, text=text, parse_mode=ParseMode.HTML)
+            logging.info("Edited MAX %s after TG edit", mx.mid)
+        except MaxApiError as e:
+            logging.warning("MAX edit failed as HTML (%s); retrying as plain text", e)
+            try:
+                await max_bot.edit_message(message_id=mx.mid, text=text, parse_mode=None)
+            except MaxApiError as e2:
+                logging.warning("MAX edit failed (%s)", e2)
 
 
 # ====== MAIN HANDLERS ======
 
-@tg_router.channel_post(F.chat.id.in_(CHANNEL_MAP))
+@tg_router.channel_post(F.chat.id.in_(TG_CHANNEL_ROUTES))
 async def on_channel_post(message: TgMessage):
-    await forward_to_max(message, CHANNEL_MAP[message.chat.id])
+    await forward_to_max(message, _targets(TG_CHANNEL_ROUTES[message.chat.id], message, True))
 
 
-@tg_router.message(F.chat.id.in_(GROUP_MAP))
+@tg_router.message(F.chat.id.in_(TG_GROUP_ROUTES))
 async def on_group_message(message: TgMessage):
-    cfg = GROUP_MAP[message.chat.id]
-
-    if cfg.allowed_user_ids is not None:
-        if not message.from_user or message.from_user.id not in cfg.allowed_user_ids:
-            return
-
-    if cfg.allowed_thread_ids is not None:
-        if (message.message_thread_id not in cfg.allowed_thread_ids and
-                int(bool(message.message_thread_id)) not in cfg.allowed_thread_ids):
-            return
-
-    sender_prefix = build_sign_prefix(message) if cfg.sign_names else ""
-    await forward_to_max(message, cfg.chat_id, sender_prefix=sender_prefix)
+    await forward_to_max(message, _targets(TG_GROUP_ROUTES[message.chat.id], message, True))
 
 
-@tg_router.edited_channel_post(F.chat.id.in_(CHANNEL_MAP))
+@tg_router.edited_channel_post(F.chat.id.in_(TG_CHANNEL_ROUTES))
 async def on_channel_post_edited(message: TgMessage):
-    await forward_edit_to_max(message)
+    await forward_edit_to_max(message, _targets(TG_CHANNEL_ROUTES[message.chat.id], message, False))
 
 
-@tg_router.edited_message(F.chat.id.in_(GROUP_MAP))
+@tg_router.edited_message(F.chat.id.in_(TG_GROUP_ROUTES))
 async def on_group_message_edited(message: TgMessage):
-    cfg = GROUP_MAP[message.chat.id]
-    if cfg.allowed_user_ids is not None:
-        if not message.from_user or message.from_user.id not in cfg.allowed_user_ids:
-            return
-    sender_prefix = build_sign_prefix(message) if cfg.sign_names else ""
-    await forward_edit_to_max(message, sender_prefix=sender_prefix)
+    await forward_edit_to_max(message, _targets(TG_GROUP_ROUTES[message.chat.id], message, False))
